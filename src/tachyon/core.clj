@@ -9,8 +9,9 @@
            [java.nio.charset Charset]
            [java.util.regex Pattern]
            [org.slf4j LoggerFactory Logger])
-  (:use [clj-stacktrace core repl]
-        [tachyon hooks]))
+  (:require [tachyon.hooks :as hooks]
+            [clj-stacktrace.repl :as stacktrace]))
+
 
 
 (def logger (LoggerFactory/getLogger "tachyon.core"))
@@ -50,7 +51,7 @@
   (str "PONG " (first (:args object))))
 
 (defn privmsg-hook [irc object match]
-  (let [results (apply-hooks irc object (:message-hooks @irc) (second (:args object)))]
+  (let [results (hooks/apply-hooks irc object (:message-hooks @irc) (second (:args object)))]
     (let [target (first (:args object))
           reply-target (if (.startsWith target "#")
                          target
@@ -65,14 +66,14 @@
     (doseq [raw-hook (:raw-hooks @irc)]
       (if ((first raw-hook) irc object)
         ((second raw-hook) irc object)))
-    (let [results (apply-hooks irc object (:command-hooks @irc) (:command object))]
+    (let [results (hooks/apply-hooks irc object (:command-hooks @irc) (:command object))]
       (doseq [result results]
         (if (isa? (class result) String)
           (send-line irc result))))))
 
 (defn handle-exception [irc cause]
   ; TODO: Implement something better..
-  (pst cause))
+  (stacktrace/pst cause))
 
 (defn connect [irc]
   (let [connector (:connector @irc)
@@ -122,9 +123,9 @@
                    :session nil
                    :raw-hooks '()
                    :message-hooks '()))]
-    (add-command-hook irc "001" join-channel-hook)
-    (add-command-hook irc "PRIVMSG" privmsg-hook)
-    (add-command-hook irc "PING" ping-hook)
+    (hooks/add-command-hook irc "001" join-channel-hook)
+    (hooks/add-command-hook irc "PRIVMSG" privmsg-hook)
+    (hooks/add-command-hook irc "PING" ping-hook)
     ; Singletons are bad... mkay?
     (ExceptionMonitor/setInstance (proxy [ExceptionMonitor] []
                                     (exceptionCaught [cause]
