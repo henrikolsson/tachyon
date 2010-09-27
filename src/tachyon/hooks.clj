@@ -1,12 +1,21 @@
 (ns tachyon.hooks
-  (:import [java.util.regex Pattern])
-  (:use [tachyon core]))
-
+  (:import [java.util.regex Pattern]))
 
 (defn regexify [obj]
   (if (isa? (class obj) Pattern)
     obj
-    (re-pattern (str "^" obj "$"))))
+    (re-pattern (str "^"
+                     (if (isa? (class obj) String)
+                       (Pattern/quote obj)
+                       obj)
+                     "$"))))
+
+(defn pattern-equal [p1 p2]
+  (= (.pattern p1) (.pattern p2)))
+
+(defn hook-equal [h1 h2]
+  (and (pattern-equal (first h1) (first h2))
+       (= (second h1) (second h2))))
 
 (defn add-raw-hook [irc pred callback]
   (dosync
@@ -17,7 +26,7 @@
   (dosync
    (ref-set irc (assoc @irc
                   :raw-hooks (remove
-                              (fn [x] (= x [pred callback]))
+                              (fn [x] (hook-equal x [(regexify pred) callback]))
                               (:raw-hooks @irc))))))
 
 
@@ -30,7 +39,7 @@
   (dosync
    (ref-set irc (assoc @irc
                   :message-hooks (remove
-                                  (fn [x] (= x [(regexify pred) callback]))
+                                  (fn [x] (hook-equal x [(regexify pred) callback]))
                                   (:message-hooks @irc))))))
 
 (defn add-command-hook [irc pred callback]
@@ -42,7 +51,7 @@
   (dosync
    (ref-set irc (assoc @irc
                   :command-hooks (remove
-                                  (fn [x] (= x [(regexify pred) callback]))
+                                  (fn [x] (hook-equal x [(regexify pred) callback]))
                                   (:command-hooks @irc))))))
 
 (defn apply-hooks [irc object hooks filter]
