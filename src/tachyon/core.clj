@@ -44,6 +44,10 @@
     (.trace logger (str "-> " message))
     (.write (:session @irc) message)))
 
+(defn send-message [irc target & rest]
+  (let [message (str "PRIVMSG " target " :" (apply str rest))]
+   (send-line message)))
+
 (defn join-channel-hook [irc object match]
   (str "JOIN " (apply str (interpose "," (:channels (:config @irc))))))
 
@@ -58,9 +62,13 @@
                          (:nick (:prefix object)))]
       (doseq [result results]
         (if result
-          (send-line irc "PRIVMSG " target " :" result)))))
-  nil)
-
+          (if (or (list? result)
+                  (seq? result)
+                  (vector? result))
+            (doseq [r result]
+              (send-message irc target r))
+            (send-message irc target result)))))))
+  
 (defn handle-incoming [irc object]
   (let [session (:session @irc)]
     (doseq [raw-hook (:raw-hooks @irc)]
