@@ -46,7 +46,7 @@
 
 (defn send-message [irc target & rest]
   (let [message (str "PRIVMSG " target " :" (apply str rest))]
-   (send-line message)))
+   (send-line irc message)))
 
 (defn join-channel-hook [irc object match]
   (str "JOIN " (apply str (interpose "," (:channels (:config @irc))))))
