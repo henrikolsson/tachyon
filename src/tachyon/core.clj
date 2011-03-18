@@ -91,9 +91,7 @@
     ; inc server-idx
     (dosync 
      (ref-set irc (assoc @irc
-                    :server-idx (if (= server-idx (count (:servers config)))
-                                  0
-                                  (+ server-idx 1)))))
+                    :server-idx 0)))
     (.info logger (str "Connecting to " (first server) ":" (second server) ".."))
     (.connect connector (new InetSocketAddress (first server) (second server)))))
 
