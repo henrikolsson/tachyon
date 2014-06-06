@@ -1,4 +1,4 @@
-(defproject tachyon "0.0.2-SNAPSHOT"
+(defproject tachyon "0.0.2"
   :description "a clojure irc library"
   :url "https://github.com/henrikolsson/tachyon"
   :license {:name "Apache license version 2"
