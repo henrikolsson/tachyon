@@ -7,14 +7,11 @@
            [org.apache.mina.util ExceptionMonitor]
            [java.net InetSocketAddress]
            [java.nio.charset Charset]
-           [java.util.regex Pattern]
-           [org.slf4j LoggerFactory Logger])
+           [java.util.regex Pattern])
   (:require [tachyon.hooks :as hooks]
-            [clj-stacktrace.repl :as stacktrace]))
+            [clj-stacktrace.repl :as stacktrace]
+            [clojure.tools.logging :as log]))
 
-
-
-(def logger (LoggerFactory/getLogger "tachyon.core"))
 (def message-regex #"^(?::([^ ]+) +)?([^ ]+)(?: +(.+))?$")
 (def param-regex #"(?:(?<!:)[^ :][^ ]*|(?<=:).*)")
 (def prefix-regex #"((.*)!(.*)@)?(.*)")
@@ -41,7 +38,7 @@
 
 (defn send-line [irc & rest]
   (let [message (apply str rest)]
-    (.trace logger (str "-> " message))
+    (log/trace (str "-> " message))
     (.write (:session @irc) message)))
 
 (defn send-message [irc target & rest]
@@ -92,7 +89,7 @@
     (dosync 
      (ref-set irc (assoc @irc
                     :server-idx 0)))
-    (.info logger (str "Connecting to " (first server) ":" (second server) ".."))
+    (log/info (str "Connecting to " (first server) ":" (second server) ".."))
     (.connect connector (new InetSocketAddress (first server) (second server)))))
 
 (defn handler [irc]
@@ -102,16 +99,16 @@
     (sessionOpened [session]
                    (dosync
                     (ref-set irc (assoc @irc :session session)))
-                   (.info logger "Connected")
+                   (log/info "Connected")
                    (send-line irc "NICK " (:nick (:config @irc)))
                    (send-line irc "USER " (:username (:config @irc)) " 8 * :" (:realname (:config @irc))))
     (sessionClosed [session]
-                   (.info logger "Disconnected")
+                   (log/info "Disconnected")
                    (Thread/sleep 2000)
                    ; TODO: Will this work? We will re-associate :session in connection object..
                    (connect irc))
     (messageReceived [session message]
-                     (.trace logger (str "<- " message))
+                     (log/trace (str "<- " message))
                      (handle-incoming irc (parse-line message)))))
 
 (defn diconnect [irc]
@@ -139,6 +136,6 @@
     (.setHandler connector (handler irc))
     (doto (.getFilterChain connector)
       (.addLast "codec" (new ProtocolCodecFilter (new TextLineCodecFactory (Charset/forName "UTF-8")))))
-      ;(.addLast "logger" (new LoggingFilter)))
+      ;(.adlog/Last  (new LoggingFilter)))
     irc))
 
