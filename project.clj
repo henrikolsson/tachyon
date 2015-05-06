@@ -1,12 +1,12 @@
-(defproject tachyon "0.0.3-SNAPSHOT"
-  :description "a clojure irc library"
+(defproject tachyon "1.0.0-SNAPSHOT"
+  :description "IRC library for clojure"
   :url "https://github.com/henrikolsson/tachyon"
-  :license {:name "Apache license version 2"
-            :url "http://www.apache.org/licenses/LICENSE-2.0"}
-  :dependencies [[org.clojure/clojure "1.5.1"]
-                 [org.apache.mina/mina-core  "2.0.9"]
+  :license {:name "MIT License"
+            :url "http://opensource.org/licenses/mit-license.php"}
+  :dependencies [[org.clojure/clojure "1.6.0"]
                  [org.slf4j/slf4j-api "1.7.10"]
-                 [clj-stacktrace "0.2.8"]
-                 [org.clojure/tools.logging "0.3.1"]]
-  :profiles {:dev {:resource-paths ["resources-dev"]
-                   :dependencies [[org.slf4j/slf4j-simple "1.7.10"]]}})
+                 [org.clojure/tools.logging "0.3.1"]
+                 [io.netty/netty-all "4.0.27.Final"]
+                 [org.clojure/core.async "0.1.346.0-17112a-alpha"]]
+  :profiles {:dev {:dependencies [[org.slf4j/slf4j-simple "1.7.10"]]}})
+

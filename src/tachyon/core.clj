@@ -1,141 +1,148 @@
 (ns tachyon.core
-  (:import [org.apache.mina.transport.socket.nio NioSocketConnector]
-           [org.apache.mina.core.service IoHandlerAdapter]
-           [org.apache.mina.filter.codec ProtocolCodecFilter ProtocolCodecFactory ProtocolDecoder ProtocolEncoder]
-           [org.apache.mina.filter.codec.textline TextLineCodecFactory TextLineEncoder TextLineDecoder LineDelimiter]
-           [org.apache.mina.filter.logging LoggingFilter]
-           [org.apache.mina.util ExceptionMonitor]
-           [java.net InetSocketAddress]
-           [java.nio.charset Charset]
-           [java.util.regex Pattern])
-  (:require [tachyon.hooks :as hooks]
-            [clj-stacktrace.repl :as stacktrace]
-            [clojure.tools.logging :as log]))
+  (:import [io.netty.channel.nio NioEventLoopGroup]
+           [io.netty.bootstrap Bootstrap]
+           [io.netty.channel.socket.nio NioSocketChannel]
+           [io.netty.handler.codec LineBasedFrameDecoder]
+           [io.netty.handler.codec.string StringDecoder StringEncoder]
+           [io.netty.channel SimpleChannelInboundHandler ChannelFutureListener ChannelHandler ChannelOption ChannelInitializer]
+           [java.nio.charset Charset])
+  (:require [tachyon.parser :refer [parse-prefix parse-line]]
+            [clojure.tools.logging :as log]
+            [clojure.core.async :refer [chan close! <! >! pub sub unsub go go-loop timeout]]))
 
-(def message-regex #"^(?::([^ ]+) +)?([^ ]+)(?: +(.+))?$")
-(def param-regex #"(?:(?<!:)[^ :][^ ]*|(?<=:).*)")
-(def prefix-regex #"((.*)!(.*)@)?(.*)")
-(defstruct irc-connection :connector :config :session :raw-hooks :message-hooks :server-idx)
+(def CHARSET (Charset/forName "UTF-8"))
 
-(defn parse-prefix [prefix]
-  (if prefix 
-    (let [matches (re-find prefix-regex prefix)]
-      {:nick (nth matches 2)
-       :username (nth matches 3)
-       :host (nth matches 4)})
-    {:nick nil
-     :username nil
-     :host nil}))
+(defn- add-future-listener [cf f]
+  (.addListener cf
+   (proxy [ChannelFutureListener] []
+     (operationComplete [future]
+       (f)))))
 
-(defn parse-line [line]
-  (let [[prefix command params] (rest (re-matches message-regex line))]
-    (let [args (if params
-                 (re-seq param-regex params)
-                 [])]
-      {:prefix (parse-prefix prefix)
-       :command command
-       :args (vec args)})))
+(defn send-line [connection line]
+  (let [pipeline @(:pipeline connection)
+        result (promise)]
+    (log/trace "->" line)
+    (add-future-listener (.write pipeline (str line "\r\n"))
+                         #(deliver result true))
+    (.flush pipeline)
+    result))
 
-(defn send-line [irc & rest]
-  (let [message (apply str rest)]
-    (log/trace (str "-> " message))
-    (.write (:session @irc) message)))
+(defn- create-bootstrap []
+  (let [bootstrap (Bootstrap.)]
+    (-> bootstrap
+        (.group (NioEventLoopGroup.))
+        (.channel NioSocketChannel)
+        (.option ChannelOption/SO_KEEPALIVE true))))
 
-(defn send-message [irc target & rest]
-  (let [message (str "PRIVMSG " target " :" (apply str rest))]
-   (send-line irc message)))
+(defn- publish [connection type body]
+  (go (>! (:channel connection)
+          (assoc body :type type))))
 
-(defn join-channel-hook [irc object match]
-  (str "JOIN " (apply str (interpose "," (:channels (:config @irc))))))
+(defn- handle-line [connection msg]
+  (log/trace "<-" (.trim msg))
+  (let [parsed (parse-line msg)]
+    (publish connection :raw {:message msg})
+    (publish connection :raw-parsed {:message parsed})))
 
-(defn ping-hook [irc object match]
-  (str "PONG " (first (:args object))))
+(defn- add-handlers [connection]
+  (let [bootstrap (:bootstrap connection)]
+    (.handler
+     bootstrap
+     (proxy [ChannelInitializer] []
+       (initChannel [channel]
+         (reset! (:pipeline connection) (.pipeline channel))
+         (.addLast (.pipeline channel)
+                   (into-array
+                    ChannelHandler
+                    [(LineBasedFrameDecoder. 2048)
+                     (StringDecoder. CHARSET)
+                     (StringEncoder. CHARSET)
+                     (proxy [SimpleChannelInboundHandler] []
+                       (channelRead0 [ctx msg]
+                         (handle-line connection msg))
+                       (exceptionCaught [ctx cause]
+                         (publish connection :error {:exception cause})
+                         (log/error cause "general error")))])))))))
 
-(defn privmsg-hook [irc object match]
-  (let [results (hooks/apply-hooks irc object (:message-hooks @irc) (second (:args object)))]
-    (let [target (first (:args object))
-          reply-target (if (.startsWith target "#")
-                         target
-                         (:nick (:prefix object)))]
-      (doseq [result results]
-        (if result
-          (if (or (list? result)
-                  (seq? result)
-                  (vector? result))
-            (doseq [r result]
-              (send-message irc target r))
-            (send-message irc target result)))))))
-  
-(defn handle-incoming [irc object]
-  (let [session (:session @irc)]
-    (doseq [raw-hook (:raw-hooks @irc)]
-      (if ((first raw-hook) irc object)
-        ((second raw-hook) irc object)))
-    (let [results (hooks/apply-hooks irc object (:command-hooks @irc) (:command object))]
-      (doseq [result results]
-        (if (isa? (class result) String)
-          (send-line irc result))))))
+(defn- add-listener [connection type f]
+  (let [subscriber (chan)]
+    (sub (:publication connection) type subscriber)
+    (go-loop []
+      (let [val (<! subscriber)]        
+        (if val
+          (do
+            (try
+              (f val)
+              (catch Exception e
+                (log/error e "error in listener")))
+            (recur)))))))
 
-(defn handle-exception [irc cause]
-  ; TODO: Implement something better..
-  (stacktrace/pst cause))
+(defn create [host port]
+  (let [bootstrap (create-bootstrap)
+        channel (chan)
+        connection {:bootstrap bootstrap
+                    :channel channel
+                    :publication (pub channel :type)
+                    :channel-future (atom nil)
+                    :pipeline (atom nil)
+                    :host host
+                    :port port}]
+    (add-handlers connection)
+    (add-listener connection :connected
+                  (fn [m]
+                    (send-line connection "NICK aegrjopaejg")
+                    (send-line connection "USER asdfsdf 8 * :foo")))
+    (add-listener connection :raw-parsed
+                  (fn [msg]
+                    (if (= (get-in msg [:message :command]) "001")
+                      (publish connection :registered {}))))
+    (add-listener connection :raw-parsed
+                  (fn [msg]
+                    (if (= (get-in msg [:message :command]) "PING")
+                      (do (log/debug msg)
+                          (send-line connection (str "PONG " (first (get-in msg [:message :args]))))))))
+    connection))
 
-(defn connect [irc]
-  (let [connector (:connector @irc)
-        config (:config @irc)
-        server-idx (:server-idx @irc)
-        server (nth (:servers config) server-idx)]
-    ; inc server-idx
-    (dosync 
-     (ref-set irc (assoc @irc
-                    :server-idx 0)))
-    (log/info (str "Connecting to " (first server) ":" (second server) ".."))
-    (.connect connector (new InetSocketAddress (first server) (second server)))))
+(defn connect [connection]
+  (let [host (:host connection)
+        port (:port connection)
+        cf (.connect (:bootstrap connection) host port)]
+    (reset! (:channel-future connection) cf)
+    (add-future-listener cf
+     #(publish connection :connected {:host host :port port}))))
 
-(defn handler [irc]
-  (proxy [IoHandlerAdapter] []
-    (exceptionCaught [session cause]
-                     (handle-exception irc cause))
-    (sessionOpened [session]
-                   (dosync
-                    (ref-set irc (assoc @irc :session session)))
-                   (log/info "Connected")
-                   (send-line irc "NICK " (:nick (:config @irc)))
-                   (send-line irc "USER " (:username (:config @irc)) " 8 * :" (:realname (:config @irc))))
-    (sessionClosed [session]
-                   (log/info "Disconnected")
-                   (Thread/sleep 2000)
-                   ; TODO: Will this work? We will re-associate :session in connection object..
-                   (connect irc))
-    (messageReceived [session message]
-                     (log/trace (str "<- " message))
-                     (handle-incoming irc (parse-line message)))))
+(defn get-publication [connection]
+  (:publication connection))
 
-(defn diconnect [irc]
-  (.close (:session @irc) true))
+(defn shutdown [c]
+  (let [cf @(:channel-future c)
+        event-loop-group (.group (:bootstrap c))]
+    (add-future-listener (.closeFuture (.channel cf))
+                         (fn []
+                           (close! (:channel c))
+                           (.shutdownGracefully event-loop-group)))
+    (.close (.channel cf))))
 
-(defn wait-for [irc]
-  (.awaitUninterruptibly (.getCloseFuture (:session @irc))))
+(defn listen [conn]
+  (let [subscriber (chan)]
+    (sub (:publication conn) :registered subscriber)
+    (go-loop []
+      (let [x (<! subscriber)]
+        (log/debug "got value:" x)
+        (if x
+          (do
+            (log/debug "recuring")
+            (recur)))))))
 
-(defn create [config]
-  (let [connector (new NioSocketConnector)
-        irc (ref (struct-map irc-connection
-                   :connector connector
-                   :config config
-                   :server-idx 0
-                   :session nil
-                   :raw-hooks '()
-                   :message-hooks '()))]
-    (hooks/add-command-hook irc "001" join-channel-hook)
-    (hooks/add-command-hook irc "PRIVMSG" privmsg-hook)
-    (hooks/add-command-hook irc "PING" ping-hook)
-    ; Singletons are bad... mkay?
-    (ExceptionMonitor/setInstance (proxy [ExceptionMonitor] []
-                                    (exceptionCaught [cause]
-                                                     (handle-exception irc cause))))
-    (.setHandler connector (handler irc))
-    (doto (.getFilterChain connector)
-      (.addLast "codec" (new ProtocolCodecFilter (new TextLineCodecFactory (Charset/forName "UTF-8")))))
-      ;(.adlog/Last  (new LoggingFilter)))
-    irc))
+;(send-line conn "NICK fooadfd")
+;(send-line conn ")
+(comment
+  (def conn (create "irc.du.se" 6667))
+  (def listener (listen conn))
+  (def listener2 (listen conn))
+  (connect conn)
+  (shutdown conn)
+  (close! listener)
+  (close! listener2))
+
 
