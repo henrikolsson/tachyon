@@ -18,9 +18,10 @@
      (operationComplete [future]
        (f)))))
 
-(defn send-line [connection line]
+(defn send-line [connection & rest]
   (let [pipeline @(:pipeline connection)
-        result (promise)]
+        result (promise)
+        line (apply str rest)]
     (log/trace "->" line)
     (add-future-listener (.write pipeline (str line "\r\n"))
                          #(deliver result true))
@@ -64,6 +65,7 @@
                          (publish connection :error {:exception cause})
                          (log/error cause "general error")))])))))))
 
+
 (defn- add-listener [connection type f]
   (let [subscriber (chan)]
     (sub (:publication connection) type subscriber)
@@ -77,7 +79,7 @@
                 (log/error e "error in listener")))
             (recur)))))))
 
-(defn create [host port]
+(defn create [config]
   (let [bootstrap (create-bootstrap)
         channel (chan)
         connection {:bootstrap bootstrap
@@ -85,27 +87,48 @@
                     :publication (pub channel :type)
                     :channel-future (atom nil)
                     :pipeline (atom nil)
-                    :host host
-                    :port port}]
+                    :server-idx (atom -1)
+                    :config config}]
     (add-handlers connection)
     (add-listener connection :connected
                   (fn [m]
-                    (send-line connection "NICK aegrjopaejg")
-                    (send-line connection "USER asdfsdf 8 * :foo")))
+                    (send-line connection "NICK " (:nick config))
+                    (send-line connection "USER " (:username config) " 8 * :" (:realname config))))
     (add-listener connection :raw-parsed
                   (fn [msg]
                     (if (= (get-in msg [:message :command]) "001")
-                      (publish connection :registered {}))))
+                      (do
+                        (log/debug "registered" (:channels config))
+                        (doseq [c (:channels config)]
+                          (send-line connection "JOIN " c))
+                        (publish connection :registered {})))))
+    (add-listener connection :raw-parsed
+                  (fn [msg]
+                    (if (= (get-in msg [:message :command]) "PRIVMSG")
+                      (publish connection :privmsg {:prefix (:prefix (:message msg))
+                                                    :target (first (:args (:message msg)))
+                                                    :msg (second (:args (:message msg)))}))))
     (add-listener connection :raw-parsed
                   (fn [msg]
                     (if (= (get-in msg [:message :command]) "PING")
                       (do (log/debug msg)
-                          (send-line connection (str "PONG " (first (get-in msg [:message :args]))))))))
+                          (send-line connection (str "PONG :" (first (get-in msg [:message :args]))))))))
     connection))
 
+
+(defn- next-server [connection]
+  (let [current-idx @(:server-idx connection)
+        servers (get-in connection [:config :servers])
+        new-idx (if (= (+ current-idx 1) (count servers))
+                  0
+                  (+ current-idx 1))]
+    (reset! (:server-idx connection) new-idx)
+    (nth servers new-idx)))
+
 (defn connect [connection]
-  (let [host (:host connection)
-        port (:port connection)
+  (let [server (next-server connection)
+        host (first server)
+        port (second server)
         cf (.connect (:bootstrap connection) host port)]
     (reset! (:channel-future connection) cf)
     (add-future-listener cf
@@ -125,7 +148,7 @@
 
 (defn listen [conn]
   (let [subscriber (chan)]
-    (sub (:publication conn) :registered subscriber)
+    (sub (:publication conn) :privmsg subscriber)
     (go-loop []
       (let [x (<! subscriber)]
         (log/debug "got value:" x)
@@ -134,15 +157,15 @@
             (log/debug "recuring")
             (recur)))))))
 
-;(send-line conn "NICK fooadfd")
-;(send-line conn ")
 (comment
-  (def conn (create "irc.du.se" 6667))
+  (def conn (create {:nick "adsfasdf"
+                     :username "user"
+                     :realname "real name"
+                     :servers [["irc.du.se" 6667] ["efnet.port80.se" 6667]]
+                     :channels ["#asdasdsd"]}))
   (def listener (listen conn))
   (def listener2 (listen conn))
   (connect conn)
   (shutdown conn)
   (close! listener)
   (close! listener2))
-
-
