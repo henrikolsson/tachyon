@@ -1,5 +1,5 @@
-(ns tachyon.test.core
-  (:use [tachyon.core] :reload)
+(ns tachyon.parser-test
+  (:use [tachyon.parser] :reload)
   (:use [clojure.test]))
 
 (deftest can-parse-line
