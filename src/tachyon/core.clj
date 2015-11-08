@@ -28,6 +28,9 @@
     (.flush pipeline)
     result))
 
+(defn send-message [connection target msg]
+  (send-line connection (str "PRIVMSG " target " :" msg)))
+
 (defn- create-bootstrap []
   (let [bootstrap (Bootstrap.)]
     (-> bootstrap
